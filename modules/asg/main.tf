@@ -11,6 +11,11 @@ data "aws_ami" "amazon_linux_2" {
     name   = "name"
     values = ["amzn2-ami-hvm*"]
   }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 # terraform aws launch template
 resource "aws_launch_template" "ec2_asg" {
@@ -20,7 +25,7 @@ resource "aws_launch_template" "ec2_asg" {
   iam_instance_profile {
     name = var.iam_ec2_instance_profile.name
   }
-  user_data = base64encode(templatefile(("userdata.sh"), {mysql_url = var.rds_db_endpoint}))
+
   vpc_security_group_ids = [var.alb_security_group_id]
   lifecycle {
     create_before_destroy = true
@@ -42,11 +47,36 @@ resource "aws_autoscaling_group" "asg-tf" {
     id      = aws_launch_template.ec2_asg.id
     version = aws_launch_template.ec2_asg.latest_version
   }
+  
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+    }
+  }
+
   vpc_zone_identifier  = [var.private_subnet_az1_id, var.private_subnet_az2_id]
 
   tag {
     key                 = "Name"
     value               = "${var.project_name}-ASG"
     propagate_at_launch = true
+  }
+}
+
+resource "aws_ssm_document" "server_setup" {
+  name          = "${var.project_name}-setup-doc"
+  document_type = "Command"
+  content       = templatefile("${path.module}/ssm_document.json.tpl", {
+    script_content = templatefile("${path.module}/userdata.sh", {mysql_url = var.rds_db_endpoint})
+  })
+}
+
+resource "aws_ssm_association" "asg_setup" {
+  name = aws_ssm_document.server_setup.name
+
+  targets {
+    key    = "tag:aws:autoscaling:groupName"
+    values = [aws_autoscaling_group.asg-tf.name]
   }
 }
